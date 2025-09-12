@@ -1,0 +1,332 @@
+---
+title: "Preprocess ELISA data"
+---
+
+```{r}
+# load serodt
+devtools::load_all("../serodt/")
+library(tidyverse)
+library(readxl)
+library(mvtnorm)
+library(janitor)
+```
+
+## Methodology
+
+### Standard curves
+
+A 4-parameter logistic model that relates OD (Optical Density) and LC (Log concentration)
+
+$$
+OD = d + \frac{a - d}{1 + 10^{(LC - c)b}}
+$$
+
+Where:
+
+-   $a$ is the minimum $OD$ (when the concentration is 0)
+
+-   $d$ is the maximum $OD$ (when the concentration is $+\infty$)
+
+-   $c$ is the $LC$ of the point of inflexion (where $OD = (d - a)/2$)
+
+-   $b$ is the slope at the inflexion point
+
+All the functions used for fitting data to the standard curve and converting LC to OD is in the `elisa_funcs.R` file
+
+The code for analysis is heavily based on the one from this Github page: <https://choisy.github.io/tetanus/analysis.html>
+
+```{r}
+source("R/elisa_funcs.R")
+```
+
+## OUCRU samples
+
+### Preparing data
+
+Load tetanus test results for OUCRU samples
+
+```{r, message = FALSE}
+data_path <- "./data/raw/oucru/"
+oucru_samples <- lapply(
+  list.files(data_path, full.names = TRUE), 
+  \(file){
+    read_csv(file) %>% 
+      clean_names()
+    }
+  )
+```
+
+Standardize data for analysis
+
+```{r}
+oucru_samples <- bind_rows(oucru_samples) %>% 
+  mutate(
+    sample_id = case_when(
+      !is.na(hc_sample_id) ~ hc_sample_id,
+      !is.na(hu_sample_id) ~ hu_sample_id,
+      !is.na(qn_sample_id) ~ qn_sample_id,
+      .default = NA
+    )
+  ) %>% 
+  select(-hc_sample_id, -hu_sample_id, -qn_sample_id) %>% 
+  standardize_data(
+    id_col = "sample_id",
+    result_col = "result",
+    dilution_fct_col = "dilution_factors",
+    antitoxin_label = "Anti_toxin"
+  )
+```
+
+### Standard curves
+
+```{r}
+oucru_plates <- oucru_samples %>% 
+    mutate(plate_id = paste0("oucru_plate_", plate_id)) %>% 
+    split(.$plate_id)
+
+# For each data from each plate, do the following
+# 1: retrieve the anti-toxins data from all plates
+oucru_antitoxins <- map(oucru_plates, get_antitoxins)
+# 2: generate the standard curve with CI in the form of a dataframe
+oucru_standard_curve_df <- map(oucru_antitoxins, standard_curve_data, nls4PL)
+# 3: convert the standard curve dataframe into a standard curve function
+oucru_standard_curves <- map(oucru_standard_curve_df, data2function)
+# 4: convert the OD of the samples into log-concentrations
+oucru_processed_samples <- map2(oucru_plates, oucru_standard_curves, process_samples)
+```
+
+Try plotting standard curves
+
+```{r}
+plot_standard_curve(
+  bind_rows(oucru_standard_curve_df, .id = "plate_label"), 
+  data = bind_rows(oucru_antitoxins, .id = "plate_label"),
+  datapoint_size = 1
+  ) +
+  facet_wrap(~ plate_label)
+```
+
+save necessary data
+
+```{r}
+# saveRDS(oucru_standard_curve_df, "./data/preprocessed/oucru_standard_curves_df.rds")
+# saveRDS(oucru_antitoxins, "./data/preprocessed/oucru_anti_toxins.rds")
+# saveRDS(oucru_samples, "./data/preprocessed/oucru_samples_by_plate.rds")
+```
+
+### Quality control
+
+For each plate:
+
+-   Get negative controls' OD at different dilution levels
+
+-   Convert to concentration
+
+-   Check which dilution gives positive result (i.e. wrong result)
+
+```{r}
+negative_controls <- map(oucru_plates, get_negative_controls) 
+negative_controls_conc <- map2(negative_controls, oucru_standard_curves, label_positive) 
+
+oucru_failed_dilutions <- negative_controls_conc %>% 
+  bind_rows(.id = "plate_label") %>% 
+  filter(positive)
+```
+
+### Process sample data
+
+Select necessary columns
+
+```{r}
+oucru_processed_samples <- oucru_processed_samples %>% 
+  bind_rows() %>% 
+  mutate(
+    test_date = as.Date(paste(year, month, day, sep = "-"))
+  ) %>% 
+  select(
+    sample_id, test_date, dilution_factors, result, lower, median, upper
+  )
+```
+
+Get sample details from `serodt`
+
+```{r}
+oucru_samples_details <- serodt::samples %>%
+  include_hospital() %>% 
+  select(
+    hospital, sample_id, gender, exact_age, age_min, age_max, date_collection, province
+  )
+
+oucru_tetanus <- oucru_samples_details %>% 
+  right_join(oucru_processed_samples, 
+             by = join_by(sample_id == sample_id))
+```
+
+## HCDC samples
+
+```{r}
+datafile <- "./data/raw/hcdc/Tetanus_Dr. Thinh_HCDC samples.xlsx"
+```
+
+### Preparing data
+
+```{r}
+#| code-fold: true
+#| code-summary: "Data preprocessing functions"
+remove_empty_plates <- function(x) x[map_lgl(x, ~ ! all(is.na(.x$RESULT)))]
+
+add_sample_id <- function(x) {
+  id <- x$HCDC_SAMPLE_ID
+  
+  x$HCDC_SAMPLE_ID <- grep("Anti", id, value = TRUE, invert = TRUE) %>% 
+    na.exclude() %>% 
+    unique() %>% 
+    # repeat 3 times for 3 dilution levels
+    rep(each = 3) %>% 
+    c(grep("Anti", id, value = TRUE))
+  
+  x
+}
+```
+
+Load tetanus samples
+
+```{r}
+plates <- datafile  %>% 
+  excel_sheets() %>% 
+  (\(.x) .x[grepl("Plate", .x)])() %>% 
+  (\(.x) setNames(map(.x, read_excel, path = datafile), .x))() %>% 
+  map(~ setNames(.x, toupper(names(.x)))) %>% 
+  remove_empty_plates() %>% 
+  map(add_sample_id)
+```
+
+### Standard curves
+
+For each plate, fit the standard curve and estimate the OD
+
+```{r}
+# standardize data before performing the steps
+standardized_plates <- map(plates, \(.){
+  standardize_data(
+    .,
+    id_col = "HCDC_SAMPLE_ID",
+    result_col = "RESULT",
+    dilution_fct_col = "DILUTION_FACTORS",
+    antitoxin_label = "Anti_toxin"
+  )
+})
+# step 1: retrieve the anti-toxins data from all plates
+anti_toxins <- map(standardized_plates, get_antitoxins)
+# step 2: generate the standard curve with CI in the form of a dataframe
+standard_curve_df <- map(anti_toxins, standard_curve_data, nls4PL)
+# step 3: convert the standard curve dataframe into a standard curve function
+standard_curves <- map(standard_curve_df, data2function)
+# step 4: convert the OD of the samples into log-concentrations
+samples <- map2(standardized_plates, standard_curves, process_samples)
+```
+
+Plot standard curves for all the plates
+
+```{r}
+plot_standard_curve(
+  bind_rows(standard_curve_df, .id = "plate_label"), 
+  data = bind_rows(anti_toxins, .id = "plate_label"),
+  datapoint_size = 1
+  ) +
+  facet_wrap(~ plate_label)
+```
+
+Save necessary data
+
+```{r}
+# saveRDS(standard_curve_df, "./data/preprocessed/hcdc_standard_curves_df.rds")
+# saveRDS(anti_toxins, "./data/preprocessed/hcdc_anti_toxins.rds")
+# saveRDS(samples, "./data/preprocessed/hcdc_samples_by_plate.rds")
+```
+
+### Quality control
+
+```{r}
+hcdc_negative_controls <- map(standardized_plates, get_negative_controls) 
+hcdc_negative_controls_conc <- map2(hcdc_negative_controls, standard_curves, label_positive) 
+
+hcdc_failed_dilutions <- negative_controls_conc %>% 
+  bind_rows(.id = "plate_label") %>% 
+  filter(positive)
+
+hcdc_failed_dilutions
+```
+
+### Process sample data
+
+```{r}
+hcdc_samples <- samples %>% 
+  bind_rows(, .id = "plate_label") %>% 
+  clean_names() %>% 
+  mutate(
+    test_date = as.Date(paste(year, month, day, sep = "-"))
+  ) %>% 
+  select(
+    sample_id, test_date, dilution_factors, result, lower, median, upper
+  )
+```
+
+Get samples details
+
+```{r}
+sample_details <- read_excel(
+  datafile,
+  sheet = "Sheet1",
+  skip = 5
+)
+
+sample_details <- sample_details %>% 
+  clean_names() %>% 
+  select(
+    benh_vien, ma_so, ngay_thang_nam_sinh, gioi_tinh, quan_huyen, tinh_tp,
+    ngay_lay_mau, the_tich_ml
+  ) %>% 
+  rename(
+    hospital = benh_vien, sample_id = ma_so,
+    dob = ngay_thang_nam_sinh, gender = gioi_tinh, district = quan_huyen,
+    province = tinh_tp, date_collection = ngay_lay_mau, vol_ml = the_tich_ml
+  )
+```
+
+Create tetanus dataset for HCDC
+
+```{r}
+hcdc_tetanus <- sample_details %>% 
+  right_join(
+    hcdc_samples,
+    by = join_by(sample_id == sample_id)
+  ) %>% 
+  mutate(
+    gender = fct_recode(
+      gender, "male" = "Nam", "female" = "Nữ"
+    )
+  )
+```
+
+## Combine samples
+
+```{r}
+tetanus_samples <- bind_rows(
+  oucru_tetanus,
+  hcdc_tetanus
+) %>% 
+  mutate(
+    province = if_else(
+      province %in% c("HCMC", "Hồ Chí Minh", "HỒ CHÍ MINH"),
+      "HCMC",
+      province
+    )
+  )
+```
+
+Preprocess the age data
+
+```{r}
+saveRDS(tetanus_samples, "data/preprocessed/all_samples.rds")
+```
