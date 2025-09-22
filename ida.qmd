@@ -26,7 +26,7 @@ positive_threshold <- 0.1
 
 -   Compute rounded age
 
--   Compute titer
+-   Compute concentration
 
     -   Use `median` value to compute where available, use `lower` or `upper` otherwise
 
@@ -39,14 +39,14 @@ Also filter samples from HCMC only
 #| code-summary: "Code for preprocessing data"
 preprocessed_data <- all_tetanus %>% 
   mutate(
-    log_titer = case_when(
+    log_concentration = case_when(
       !is.na(median) ~ median,
       !is.na(upper) ~ upper,
       !is.na(lower) ~ lower,
       .default = NA
     ),
-    titer = (10^log_titer)*dilution_factors,
-    serostatus = if_else(titer>0.1, "positive", "negative"),
+    concentration = (10^log_concentration)*dilution_factors,
+    serostatus = if_else(concentration>0.1, "positive", "negative"),
     source = if_else(str_detect(sample_id, "^U"), "hcdc", "oucru"),
     age = case_when(
       !is.na(dob) ~ as.double(difftime(date_collection, dob, unit = "days"))/365.25,
@@ -64,16 +64,16 @@ preprocessed_data <- all_tetanus %>%
 
 ### Different dilutions
 
-Visualize distribution of titer at different dilution levels and the positive threshold
+Visualize distribution of concentration at different dilution levels and the positive threshold
 
 ```{r warning=FALSE}
 #| code-fold: true
-#| code-summary: "Plot distribution of log titer at different dilutions"
+#| code-summary: "Plot distribution of log concentration at different dilutions"
 preprocessed_data %>% 
   ggplot() +
     geom_density(
       aes(
-        x = titer,
+        x = concentration,
         color = source
       )
     ) +
@@ -93,16 +93,16 @@ preprocessed_data %>%
 dilution_fct <- 200
 ```
 
-### OUCRU vs HCDC titer
+### OUCRU vs HCDC concentration
 
 ::: panel-tabset
 ## Density plot
 
-Distribution of titer for each age group
+Distribution of concentration for each age group
 
 ```{r warning=FALSE}
 #| code-fold: true
-#| code-summary: "Plot distribution of titer stratified by age"
+#| code-summary: "Plot distribution of concentration stratified by age"
 preprocessed_data %>% 
   filter(
     rounded_age <= 15,
@@ -111,7 +111,7 @@ preprocessed_data %>%
   ggplot() +
     geom_density(
       aes(
-        x = titer,
+        x = concentration,
         color = source
       )
     ) +
@@ -126,11 +126,11 @@ preprocessed_data %>%
 
 ## Boxplot
 
-Box plot of titer per age group
+Box plot of concentration per age group
 
 ```{r warning=FALSE}
 #| code-fold: true
-#| code-summary: "Code for box plot of titer"
+#| code-summary: "Code for box plot of concentration"
 preprocessed_data %>% 
   filter(
     rounded_age <= 15,
@@ -140,7 +140,7 @@ preprocessed_data %>%
     geom_jitter(
         aes(
           x = source,
-          y = titer,
+          y = concentration,
           color = source
         ),
         alpha = 0.2
@@ -148,7 +148,7 @@ preprocessed_data %>%
     geom_boxplot(
       aes(
         x = source,
-        y = titer,
+        y = concentration,
         color = source
       ),
       fill = NA
@@ -161,11 +161,50 @@ preprocessed_data %>%
     scale_y_log10()+
     facet_wrap(~ rounded_age, scales = "free_y")
 ```
+
+
+## Regression plot
+```{r warning=FALSE}
+#| code-fold: true
+#| code-summary: "Code for plotting concentration over age"
+preprocessed_data %>% 
+  filter(
+    rounded_age <= 15,
+    dilution_factors == dilution_fct
+    ) %>% 
+  ggplot() +
+    geom_point(
+          aes(
+            x = age,
+            y = concentration,
+            color = source
+          ),
+          alpha = 0.2
+        ) +
+    geom_smooth(
+        aes(
+          x = age,
+          y = concentration,
+          color = source,
+          fill = source
+        ),
+        method = "loess"
+      ) +
+    geom_hline(
+      aes(yintercept = positive_threshold),
+      color = "green",
+      linetype = "dashed"
+    ) +
+    scale_y_log10()
+```
+
+
+
 :::
 
 ***Note:***
 
--   There is no samples from OUCRU for age groups `2 - 5` and `12 - 15`
+-   There are no samples from OUCRU for age groups `3 - 5` and `12 - 15`
 
 The following table summarizes number of samples for each rounded age from each source
 
@@ -187,7 +226,7 @@ preprocessed_data %>%
 
 ### Stratified by age group
 
-Separate the data into 2 age groups: `<4` and `6-11` for comparison
+Separate the data into 2 age groups: `<3` and `7-12` for comparison
 
 ```{r}
 #| code-fold: true
@@ -195,10 +234,10 @@ Separate the data into 2 age groups: `<4` and `6-11` for comparison
 data_by_agegrp <- preprocessed_data %>%
   mutate(
     age_group = case_when(
-      age < 4 ~ "< 4",
-      age >= 6 & age <= 11 ~ "6-11"
-    ),
-    .default = NA
+      age < 3 ~ "< 3",
+      age >= 7 & age <= 12 ~ "7-12",
+      .default = NA
+    )
   ) %>% 
   filter(
     !is.na(serostatus),
@@ -207,12 +246,11 @@ data_by_agegrp <- preprocessed_data %>%
   ) 
 ```
 
-Perform t-test to compare distribution of titer (on log scale) of 2 age groups (`<4`, `6-11`) between OUCRU and HCDC samples
+Perform two samples Wilcoxon test to compare distribution of concentration (on log scale) of 2 age groups (`<3`, `7-12`) between OUCRU and HCDC samples
 
 ```{r}
 #| code-fold: true
-#| code-summary: "Perform t-test to compare log titer for 2 age groups"
-
+#| code-summary: "Perform wilcoxon test to compare log concentration for 2 age groups"
 concentration_by_agegrp <- data_by_agegrp %>% 
   group_by(
     age_group
@@ -220,24 +258,31 @@ concentration_by_agegrp <- data_by_agegrp %>%
   nest() %>% # divide the data.frame by each age group
   mutate(
     # perform t.test to compare samples from each source
-    t_test = map(data, 
+    # t_test = map(data, 
+    #   ~ t.test(
+    #     log_concentration ~ source, data = .x
+    #   )
+    # ),
+    # p_value = map_dbl(t_test, ~.x$p.value),
+    # perform two-sample wilcoxon test instead to compare samples from each source
+    wilcox = map(data, 
       ~ t.test(
-        log_titer ~ source, data = .x
+        log_concentration ~ source, data = .x
       )
     ),
-    t_test_p = map_dbl(t_test, ~.x$p.value),
+    p_value = map_dbl(wilcox, ~.x$p.value),
     # compute summary for samples from each source (HCDC and OUCRU)
     dat_summary = map(data, \(dat){
       dat %>% 
         group_by(source) %>% 
         summarize(
-          median_titer = median(titer),
-          lwr = quantile(titer, probs = 0.25),
-          upper = quantile(titer, probs = 0.75)
+          median_concentration = median(concentration),
+          lwr = quantile(concentration, probs = 0.25),
+          upper = quantile(concentration, probs = 0.75)
         ) %>% 
         mutate(
           label = sprintf("%.4f (%.4f–%.4f)",
-          median_titer,
+          median_concentration,
           lwr,
           upper),
           .keep = "unused"
@@ -258,13 +303,10 @@ concentration_by_agegrp <- data_by_agegrp %>%
 #| code-fold: true
 #| code-summary: "Generate the comparison table"
 concentration_by_agegrp %>%
-  select(age_group, oucru, hcdc, t_test_p) %>% 
-  rename(
-    p_value = t_test_p
-  ) %>% 
+  select(age_group, oucru, hcdc, p_value) %>% 
   ungroup() %>% 
   gt(rowname_col = "age_group") %>%
-  tab_header(title = "Log(titer) by sample source and age group") %>% 
+  tab_header(title = "Log(concentration) by sample source and age group") %>% 
   tab_style(
     style = list(cell_text(weight = "bold")),
     locations = list(
@@ -276,9 +318,9 @@ concentration_by_agegrp %>%
 
 ***Note:***
 
--   The result suggests that there is a statistically significant difference between `log(titer)` of OUCRU and HCDC samples for older age group (`6-11`), more specifically: log(titer) from HCDC samples is higher.
+-   The result suggests that there is no statistically significant difference between `log(concentration)` of OUCRU and HCDC samples for both age groups.
 
-The following plots demonstrate the distribution of log(titer)
+The following plots demonstrate the distribution of log(concentration)
 
 ::: panel-tabset
 ## Density plot
@@ -291,7 +333,7 @@ concentration_by_agegrp %>%
   ggplot() +
     geom_density(
       aes(
-        x = titer,
+        x = concentration,
         color = source
       )
     ) +
@@ -315,7 +357,7 @@ concentration_by_agegrp %>%
     geom_jitter(
         aes(
           x = source,
-          y = titer,
+          y = concentration,
           color = source
         ),
         alpha = 0.2
@@ -323,7 +365,7 @@ concentration_by_agegrp %>%
     geom_boxplot(
       aes(
         x = source,
-        y = titer,
+        y = concentration,
         color = source
       ),
       fill = NA
@@ -363,9 +405,10 @@ prevalence_by_agegrp <- data_by_agegrp %>%
     ),
     seroprevalence_lwr = seroprevalence_ci[[1]],
     seroprevalence_upper = seroprevalence_ci[[2]]
-  )
+  ) %>% 
+  ungroup()
 ```
-
+Seroprevalence with confidence intervals
 ```{r}
 #| code-fold: true
 #| code-summary: "generate the table"
@@ -389,6 +432,111 @@ prevalence_by_agegrp %>%
     )
   )
 ```
+Comparison tables with p-value. Only samples from the 2 age groups `<3` and `7-12` are included.
+
+::: {.panel-tabset}
+
+## Overall
+Chi-squared test
+```{r warning=FALSE}
+#| code-fold: true
+#| code-summary: "generate the summary table"
+library(gtsummary)
+
+data_by_agegrp %>% 
+  select(serostatus, source) %>% 
+  tbl_summary(
+    by = source,          
+    type = all_categorical() ~ "categorical",
+    missing = "no"
+  ) %>%
+  add_p(test = everything() ~ "chisq.test") %>%  
+  add_n() %>%                                    
+  bold_labels()
+```
+
+## By age group
+
+```{r}
+#| code-fold: true
+#| code-summary: "perform Fisher exact test"
+
+prevalence_compare <- data_by_agegrp %>% 
+  group_by(
+    age_group
+  ) %>% 
+  nest() %>% # divide the data.frame by each age group
+  mutate(
+    # perform fisher.test to compare samples from each source
+    fisher_test = map(data, 
+      \(df){
+        tab <- table(df$serostatus, df$source)
+        fisher.test(tab)
+      }
+    ),
+    fisher_test_p = map_dbl(fisher_test, ~.x$p.value),
+    odd_ratio = map_chr(fisher_test, \(out){
+      sprintf("%.3f (%.3f–%.3f)",
+        out$estimate,
+        out$conf.int[1],
+        out$conf.int[2])
+    }),
+    # compute summary for samples from each source (HCDC and OUCRU)
+    dat_summary = map(data, \(dat){
+      dat %>% 
+        group_by(source) %>% 
+        summarize(
+          label = paste0(sum(serostatus == "positive"), "/", n())
+        )
+    }
+    )
+  ) %>% 
+  unnest(
+    dat_summary
+  ) %>% 
+  pivot_wider(
+    names_from = source,
+    values_from = label
+  )
+```
+Check the negative-positive counts for each age group
+```{r}
+map(prevalence_compare$data, 
+  \(df){
+    table(df$serostatus, df$source)
+})
+```
+Comparison table with p-value from the Fisher exact test
+
+```{r}
+#| code-fold: true
+#| code-summary: "generate the table"
+prevalence_compare %>%
+  select(age_group, hcdc, oucru, odd_ratio, fisher_test_p) %>%
+  ungroup() %>% 
+  rename(
+    p_val = fisher_test_p,
+    `HCDC (pos/tot)` = hcdc,
+    `OUCRU (pos/tot)` = oucru,
+    `Odd ratio (95% CI)` = odd_ratio
+  ) %>% 
+  gt(rowname_col = "age_group") %>%
+  tab_header(title = "Compare prevalence by sample source and age group") %>% 
+  tab_style(
+    style = list(cell_text(weight = "bold")),
+    locations = list(
+      cells_column_labels(everything()),
+      cells_stub()
+    )
+  ) %>%
+  fmt_number(
+    columns = where(is.numeric),
+    decimals = 4
+  )
+```
+
+:::
+
 
 ### Age stratified seroprevalence
 
@@ -494,7 +642,7 @@ The result from model stratified by gender suggests that:
 
 -   There's no statistically significant difference in seroprevalence between male and female samples (for age group \<= 15)
 
-However, it may be due to the fact that the sample size for OUCRU samples is quite small and we don't have any data for several age groups (`2-5`, `11-14`)
+However, it may be due to the fact that the sample size for OUCRU samples is quite small and we don't have any data for several age groups (`3-6`, `11-14`)
 
 Another issue is that there is an imbalance in the number of male vs female samples (male:female ratio is 13.58:1)
 
