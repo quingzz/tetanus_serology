@@ -1,5 +1,5 @@
 ---
-title: "IDA for tetanus data"
+title: "Tetanus sero data"
 toc: TRUE
 ---
 
@@ -46,7 +46,14 @@ preprocessed_data <- all_tetanus %>%
       .default = NA
     ),
     concentration = (10^log_concentration)*dilution_factors,
-    serostatus = if_else(concentration>0.1, "positive", "negative"),
+    serostatus = if_else(
+      !is.na(concentration),
+      # if concentration available, determine positivity using threshold
+      if_else(concentration >= 0.1, "positive", "negative"),
+      # if concentration not available, determine positivity using OD
+      # if result closer to OD upper bound, it is positive
+      if_else((4 - result) < (result - 0), "positive", "negative")
+    ),
     source = if_else(str_detect(sample_id, "^U"), "hcdc", "oucru"),
     age = case_when(
       !is.na(dob) ~ as.double(difftime(date_collection, dob, unit = "days"))/365.25,
@@ -59,7 +66,14 @@ preprocessed_data <- all_tetanus %>%
   ) %>% 
   filter(
     province %in% c("HCMC", "Hồ Chí Minh", "HỒ CHÍ MINH")
-  )
+  ) %>% group_by(source) %>% 
+  mutate(
+    time_durr = paste0(
+      format(min(date_collection), "%Y/%m"), 
+      " - ", 
+      format(max(date_collection), "%Y/%m"))
+  ) %>% 
+  ungroup() 
 ```
 
 ### Different dilutions
@@ -74,7 +88,7 @@ preprocessed_data %>%
     geom_density(
       aes(
         x = concentration,
-        color = source
+        color = time_durr
       )
     ) +
     geom_vline(
@@ -85,7 +99,10 @@ preprocessed_data %>%
       linetype = "dashed"
     ) +
     scale_x_log10() +
-    facet_wrap(~ dilution_factors)
+    facet_wrap(~ dilution_factors) +
+    labs(
+      color = "Collection period"
+    )
 ```
 
 ```{r}
@@ -93,7 +110,7 @@ preprocessed_data %>%
 dilution_fct <- 200
 ```
 
-### OUCRU vs HCDC concentration
+### Concentration by collection period
 
 ::: panel-tabset
 ## Density plot
@@ -112,7 +129,7 @@ preprocessed_data %>%
     geom_density(
       aes(
         x = concentration,
-        color = source
+        color = time_durr
       )
     ) +
     geom_vline(
@@ -121,7 +138,10 @@ preprocessed_data %>%
       linetype = "dashed"
     ) +
     scale_x_log10()+
-    facet_wrap(~ rounded_age, scales = "free_y")
+    facet_wrap(~ rounded_age, scales = "free_y") + 
+    labs(
+      color = "Collection period"
+    )
 ```
 
 ## Boxplot
@@ -141,7 +161,7 @@ preprocessed_data %>%
         aes(
           x = source,
           y = concentration,
-          color = source
+          color = time_durr
         ),
         alpha = 0.2
       ) +
@@ -149,7 +169,7 @@ preprocessed_data %>%
       aes(
         x = source,
         y = concentration,
-        color = source
+        color = time_durr
       ),
       fill = NA
     ) +
@@ -159,7 +179,10 @@ preprocessed_data %>%
       linetype = "dashed"
     ) +
     scale_y_log10()+
-    facet_wrap(~ rounded_age, scales = "free_y")
+    facet_wrap(~ rounded_age, scales = "free_y")+
+    labs(
+        color = "Collection period"
+      )
 ```
 
 
@@ -177,7 +200,7 @@ preprocessed_data %>%
           aes(
             x = age,
             y = concentration,
-            color = source
+            color = time_durr
           ),
           alpha = 0.2
         ) +
@@ -185,8 +208,8 @@ preprocessed_data %>%
         aes(
           x = age,
           y = concentration,
-          color = source,
-          fill = source
+          color = time_durr,
+          fill = time_durr
         ),
         method = "loess"
       ) +
@@ -195,7 +218,11 @@ preprocessed_data %>%
       color = "green",
       linetype = "dashed"
     ) +
-    scale_y_log10()
+    scale_y_log10() +
+    labs(
+        color = "Collection period"
+      ) + 
+    guides(fill = "none")
 ```
 
 
@@ -204,9 +231,9 @@ preprocessed_data %>%
 
 ***Note:***
 
--   There are no samples from OUCRU for age groups `3 - 5` and `12 - 15`
+-   There are no samples for age groups `3 - 5` and `12 - 15` during the 2012-2016 collection period 
 
-The following table summarizes number of samples for each rounded age from each source
+The following table summarizes number of samples for each rounded age from each collection period
 
 ```{r}
 #| code-fold: true
@@ -216,12 +243,13 @@ preprocessed_data %>%
     rounded_age <= 15,
     dilution_factors == dilution_fct
     ) %>% 
-  group_by(source, rounded_age) %>% 
+  group_by(time_durr, rounded_age) %>% 
   count() %>% 
   pivot_wider(
-    names_from = source,
+    names_from = time_durr,
     values_from = n
-  )
+  ) %>% 
+  arrange(rounded_age)
 ```
 
 ### Stratified by age group
@@ -240,18 +268,18 @@ data_by_agegrp <- preprocessed_data %>%
     )
   ) %>% 
   filter(
-    !is.na(serostatus),
     !is.na(age_group),
     dilution_factors == dilution_fct
   ) 
 ```
 
-Perform two samples Wilcoxon test to compare distribution of concentration (on log scale) of 2 age groups (`<3`, `7-12`) between OUCRU and HCDC samples
+Perform two samples Wilcoxon test to compare distribution of concentration (on log scale) of 2 age groups (`<3`, `7-12`) between samples from 2 collection periods
 
 ```{r}
 #| code-fold: true
 #| code-summary: "Perform wilcoxon test to compare log concentration for 2 age groups"
 concentration_by_agegrp <- data_by_agegrp %>% 
+  filter(!is.na(concentration)) %>% 
   group_by(
     age_group
   ) %>% 
@@ -267,14 +295,14 @@ concentration_by_agegrp <- data_by_agegrp %>%
     # perform two-sample wilcoxon test instead to compare samples from each source
     wilcox = map(data, 
       ~ t.test(
-        log_concentration ~ source, data = .x
+        log_concentration ~ time_durr, data = .x
       )
     ),
     p_value = map_dbl(wilcox, ~.x$p.value),
     # compute summary for samples from each source (HCDC and OUCRU)
     dat_summary = map(data, \(dat){
       dat %>% 
-        group_by(source) %>% 
+        group_by(time_durr) %>% 
         summarize(
           median_concentration = median(concentration),
           lwr = quantile(concentration, probs = 0.25),
@@ -294,7 +322,7 @@ concentration_by_agegrp <- data_by_agegrp %>%
     dat_summary
   ) %>% 
   pivot_wider(
-    names_from = source,
+    names_from = time_durr,
     values_from = label
   )
 ```
@@ -303,10 +331,11 @@ concentration_by_agegrp <- data_by_agegrp %>%
 #| code-fold: true
 #| code-summary: "Generate the comparison table"
 concentration_by_agegrp %>%
-  select(age_group, oucru, hcdc, p_value) %>% 
+  select(-wilcox, -data) %>% 
+  relocate(p_value, .after = last_col()) %>% 
   ungroup() %>% 
   gt(rowname_col = "age_group") %>%
-  tab_header(title = "Log(concentration) by sample source and age group") %>% 
+  tab_header(title = "Log(concentration) by collection period and age group") %>% 
   tab_style(
     style = list(cell_text(weight = "bold")),
     locations = list(
@@ -318,7 +347,7 @@ concentration_by_agegrp %>%
 
 ***Note:***
 
--   The result suggests that there is no statistically significant difference between `log(concentration)` of OUCRU and HCDC samples for both age groups.
+-   The result suggests that for both age groups, there is no statistically significant difference in the `log(concentration)` of samples between the 2 collection periods.
 
 The following plots demonstrate the distribution of log(concentration)
 
@@ -334,7 +363,7 @@ concentration_by_agegrp %>%
     geom_density(
       aes(
         x = concentration,
-        color = source
+        color = time_durr
       )
     ) +
     geom_vline(
@@ -343,7 +372,10 @@ concentration_by_agegrp %>%
       linetype = "dashed"
     ) +
     scale_x_log10() +
-    facet_wrap(~ age_group, scales = "free_y")
+    facet_wrap(~ age_group, scales = "free_y") +
+    labs(
+        color = "Collection period"
+      ) 
 ```
 
 ## Box plot
@@ -356,17 +388,17 @@ concentration_by_agegrp %>%
   ggplot() +
     geom_jitter(
         aes(
-          x = source,
+          x = time_durr,
           y = concentration,
-          color = source
+          color = time_durr
         ),
         alpha = 0.2
       ) +
     geom_boxplot(
       aes(
-        x = source,
+        x = time_durr,
         y = concentration,
-        color = source
+        color = time_durr
       ),
       fill = NA
     ) +
@@ -375,7 +407,10 @@ concentration_by_agegrp %>%
       color = "green",
       linetype = "dashed"
     ) +
-    scale_y_log10()+
+    scale_y_log10() +
+    labs(
+        color = "Collection period"
+      ) +
     facet_wrap(~ age_group, scales = "free_y")
 ```
 :::
@@ -384,16 +419,16 @@ concentration_by_agegrp %>%
 
 ### Comparison table
 
-```{r}
+```{r warning=FALSE, message=FALSE}
 #| code-fold: true
 #| code-summary: "Compute prevalence and confidence interval"
 prevalence_by_agegrp <- data_by_agegrp %>% 
   group_by(
-    source, age_group
+    time_durr, age_group
   ) %>% 
   summarize(
     seropositive = sum(serostatus == "positive"),
-    sample_size = n()
+    sample_size = sum(!is.na(serostatus))
   ) %>% 
   rowwise() %>% 
   mutate(
@@ -419,11 +454,11 @@ prevalence_by_agegrp %>%
         100 * seroprevalence_lwr,
         100 * seroprevalence_upper)
   ) %>% 
-  select(source, age_group, label) %>%
-  pivot_wider(names_from = source,
+  select(time_durr, age_group, label) %>%
+  pivot_wider(names_from = time_durr,
               values_from = label) %>%
   gt(rowname_col = "age_group") %>%
-  tab_header(title = "Seroprevalence by sample source and age group") %>% 
+  tab_header(title = "Seroprevalence by collection period and age group") %>% 
   tab_style(
     style = list(cell_text(weight = "bold")),
     locations = list(
@@ -444,9 +479,9 @@ Chi-squared test
 library(gtsummary)
 
 data_by_agegrp %>% 
-  select(serostatus, source) %>% 
+  select(serostatus, time_durr) %>% 
   tbl_summary(
-    by = source,          
+    by = time_durr,          
     type = all_categorical() ~ "categorical",
     missing = "no"
   ) %>%
@@ -470,7 +505,7 @@ prevalence_compare <- data_by_agegrp %>%
     # perform fisher.test to compare samples from each source
     fisher_test = map(data, 
       \(df){
-        tab <- table(df$serostatus, df$source)
+        tab <- table(df$serostatus, df$time_durr)
         fisher.test(tab)
       }
     ),
@@ -484,7 +519,7 @@ prevalence_compare <- data_by_agegrp %>%
     # compute summary for samples from each source (HCDC and OUCRU)
     dat_summary = map(data, \(dat){
       dat %>% 
-        group_by(source) %>% 
+        group_by(time_durr) %>% 
         summarize(
           label = paste0(sum(serostatus == "positive"), "/", n())
         )
@@ -494,8 +529,9 @@ prevalence_compare <- data_by_agegrp %>%
   unnest(
     dat_summary
   ) %>% 
+  ungroup() %>% 
   pivot_wider(
-    names_from = source,
+    names_from = time_durr,
     values_from = label
   )
 ```
@@ -503,7 +539,7 @@ Check the negative-positive counts for each age group
 ```{r}
 map(prevalence_compare$data, 
   \(df){
-    table(df$serostatus, df$source)
+    table(df$serostatus, df$time_durr)
 })
 ```
 Comparison table with p-value from the Fisher exact test
@@ -512,16 +548,16 @@ Comparison table with p-value from the Fisher exact test
 #| code-fold: true
 #| code-summary: "generate the table"
 prevalence_compare %>%
-  select(age_group, hcdc, oucru, odd_ratio, fisher_test_p) %>%
-  ungroup() %>% 
+  select(-data, -fisher_test) %>%
+  relocate(odd_ratio, fisher_test_p, .after = last_col()) %>% 
   rename(
     p_val = fisher_test_p,
-    `HCDC (pos/tot)` = hcdc,
-    `OUCRU (pos/tot)` = oucru,
+    `2023/03 - 2023/12 (pos/tot)` = `2023/03 - 2023/12`,
+    `2012/01 - 2016/06 (pos/tot)` = `2012/01 - 2016/06`,
     `Odd ratio (95% CI)` = odd_ratio
   ) %>% 
   gt(rowname_col = "age_group") %>%
-  tab_header(title = "Compare prevalence by sample source and age group") %>% 
+  tab_header(title = "Compare prevalence by collection period and age group") %>% 
   tab_style(
     style = list(cell_text(weight = "bold")),
     locations = list(
@@ -542,7 +578,7 @@ prevalence_compare %>%
 
 ```{r}
 #| code-fold: true
-#| code-summary: "Helper function to compute age-stratified seroprev"
+#| code-summary: "Helper function to compute age-stratified aggregated seroprev"
 
 compute_seroprev <- function(data, age_lim, dilution_fct, group_var){
   if(!is.null(group_var)){
@@ -578,28 +614,27 @@ compute_seroprev <- function(data, age_lim, dilution_fct, group_var){
   
   out
 }
-
 ```
 
 Check whether there is a difference in seroprevalence between:
 
--  OUCRU and HCDC samples
+-  samples from the 2 collection periods
 
 -  female and male samples
 
 ::: {.panel-tabset}
 
-## Source
+## Collection period
 
 ```{r message = FALSE, warning=FALSE}
 #| code-fold: true
-#| code-summary: "Model stratified by source"
+#| code-summary: "Model stratified by collection period"
 
-# ----- Model with smoothing stratified by source ------
-seroprev_mod_source <- preprocessed_data %>% 
-  compute_seroprev(age_lim = 15, dilution_fct = dilution_fct, group_var = "source") %>% 
-  gam(cbind(pos, neg) ~ s(rounded_age, bs = "bs", by = source) + source, data = ., family=binomial(link = "logit"))
-summary(seroprev_mod_source)
+# ----- Model with smoothing stratified by collection period ------
+seroprev_mod_coll <- preprocessed_data %>% 
+  compute_seroprev(age_lim = 15, dilution_fct = dilution_fct, group_var = "time_durr") %>% 
+  gam(cbind(pos, neg) ~ s(rounded_age, bs = "bs", by = time_durr) + time_durr, data = ., family=binomial(link = "logit"))
+summary(seroprev_mod_coll)
 ```
 
 ## Gender
@@ -612,13 +647,8 @@ seroprev_mod_gender <- preprocessed_data %>%
   compute_seroprev(age_lim = 15, dilution_fct = dilution_fct, group_var = "gender") %>% 
   gam(cbind(pos, neg) ~ s(rounded_age, bs = "bs", by = gender) + gender, data = ., family=binomial(link = "logit"))
 summary(seroprev_mod_gender)
-
-# ----- Baseline model (no stratification) ------
-seroprev_mod <- preprocessed_data %>% 
-  compute_seroprev(age_lim = 15, dilution_fct = dilution_fct, group_var = NULL) %>%
-  gam(cbind(pos, neg) ~ s(rounded_age, bs = "bs"), data = ., family=binomial(link = "logit"))
-summary(seroprev_mod)
 ```
+
 ## No stratification
 ```{r message = FALSE, warning=FALSE}
 #| code-fold: true
@@ -636,26 +666,26 @@ summary(seroprev_mod)
 
 The result from model stratified by (sample) source suggests that:
 
--   Seroprevalence of OUCRU samples is higher (for age group \<= 15)
+-   There's no statistically significant difference in seroprevalence between the samples from these 2 sampling period
 
 The result from model stratified by gender suggests that:
 
--   There's no statistically significant difference in seroprevalence between male and female samples (for age group \<= 15)
+-   There's no statistically significant difference in seroprevalence between male and female samples
 
-However, it may be due to the fact that the sample size for OUCRU samples is quite small and we don't have any data for several age groups (`3-6`, `11-14`)
+However, it may be due to the fact that the sample size for the earlier collection period (using OUCRU samples) is quite small and we don't have any data for several age groups (`3-6`, `11-14`)
 
-Another issue is that there is an imbalance in the number of male vs female samples (male:female ratio is 13.58:1)
+Another issue is that there is an imbalance in the number of male vs female samples during later collection period (male:female ratio is 13.58:1)
 
 ```{r}
 preprocessed_data %>% 
-  filter(source == "hcdc", dilution_factors == dilution_fct) %>% 
-  group_by(gender) %>% 
+  filter(dilution_factors == dilution_fct) %>% 
+  group_by(source, time_durr, gender) %>% 
   count()
 ```
 
 ### Quick visualization
 
-Visualize the model for source/gender stratified smoothing
+Visualize the model for collection period/gender stratified smoothing
 ```{r}
 #| code-fold: true
 #| code-summary: "Helper function to visualize model with confidence interval"
@@ -673,7 +703,6 @@ visualize_pred <- function(data, mod, group_var, ci = 0.95, length_out = 100, ce
       rounded_age = seq(min(data$rounded_age), max(data$rounded_age), length.out = length_out)
     )
   }
-  
   
   linkinv <- mod$family$linkinv
   p <- (1 - ci) / 2
@@ -704,19 +733,23 @@ visualize_pred <- function(data, mod, group_var, ci = 0.95, length_out = 100, ce
       aes(
         x = rounded_age, y = fit, 
         ymin = lower, ymax = upper,
-        color = if(!is.null(group_var)) factor(.data[[group_var]]) else "cornflowerblue"),
+        color = if(!is.null(group_var)) factor(.data[[group_var]]) else "cornflowerblue",
+        fill = if(!is.null(group_var)) factor(.data[[group_var]]) else "cornflowerblue"
+      ),
       data = out,
       stat = "identity"
     ) +
     geom_point(
       aes(
         x = rounded_age, y = seroprev, 
-        size = cex*(pos)/max(tot), 
-        color = if(!is.null(group_var)) factor(.data[[group_var]]) else "black"),
+        size = cex*pos/max(tot), 
+        color = if(!is.null(group_var)) factor(.data[[group_var]]) else "black",
+        fill = if(!is.null(group_var)) factor(.data[[group_var]]) else "grey"
+      ),
       shape = 1,
       data = data
     ) +
-    guides(size = "none") +
+    guides(size = "none", fill="none") +
     labs(x = "Age (years)",
          y = "Seroprevalence",
          color = if(!is.null(group_var)) str_to_title(group_var) else "") 
@@ -726,11 +759,14 @@ visualize_pred <- function(data, mod, group_var, ci = 0.95, length_out = 100, ce
 
 ::: {.panel-tabset}
 
-## Source
+## Collection period
 ```{r  message = FALSE, warning=FALSE}
 preprocessed_data %>% 
-  compute_seroprev(age_lim = 15, dilution_fct = dilution_fct, group_var = "source") %>% 
-  visualize_pred(mod = seroprev_mod_source, group_var = "source")
+  compute_seroprev(age_lim = 15, dilution_fct = dilution_fct, group_var = "time_durr") %>%
+  visualize_pred(mod = seroprev_mod_coll, group_var = "time_durr") +
+  labs(
+    color = "Collection period"
+  )
 ```
 ## Gender
 
@@ -740,6 +776,7 @@ preprocessed_data %>%
   compute_seroprev(age_lim = 15, dilution_fct = dilution_fct, group_var = "gender") %>% 
   visualize_pred(mod = seroprev_mod_gender, group_var = "gender")
 ```
+
 :::
 
 
@@ -799,16 +836,18 @@ library(serosv)
 preprocessed_data %>% 
   filter(
     source == "hcdc", 
-    rounded_age < 15,
-    dilution_factors == dilution_fct) %>% 
+    rounded_age <= 15,
+    dilution_factors == dilution_fct,
+    !is.na(serostatus)
+  ) %>% 
   select(rounded_age, serostatus) %>% 
   mutate(
     status = if_else(serostatus == "positive", 1, 0)
-  ) %>% 
+  ) %>%
   rename(
     age = rounded_age
   ) %>% 
-  penalized_spline_model() %>% 
+  penalized_spline_model(s = "tp", framework = "pl") %>% 
   plot()
 ```
 

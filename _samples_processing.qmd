@@ -2,7 +2,7 @@
 title: "Preprocess ELISA data"
 ---
 
-```{r}
+```{r warning = FALSE, message=FALSE}
 # load serodt
 devtools::load_all("../serodt/")
 library(tidyverse)
@@ -58,7 +58,7 @@ oucru_samples <- lapply(
 
 Standardize data for analysis
 
-```{r}
+```{r warning = FALSE}
 oucru_samples <- bind_rows(oucru_samples) %>% 
   mutate(
     sample_id = case_when(
@@ -274,7 +274,7 @@ hcdc_samples <- samples %>%
 
 Get samples details
 
-```{r}
+```{r warning = FALSE}
 sample_details <- read_excel(
   datafile,
   sheet = "Sheet1",
