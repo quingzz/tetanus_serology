@@ -24,13 +24,18 @@ positive_threshold <- 0.1
 
 -   Label whether it is oucru or hcdc sample
 
+-   Label the collection period for samples from each source
+
 -   Compute rounded age
 
 -   Compute concentration
 
     -   Use `median` value to compute where available, use `lower` or `upper` otherwise
+    -   Concentration is computed by `titer*dilution_fct` where titer is the predicted "concentration" from the standard curve.
 
 -   Label whether the sample is considered positive using 0.1IU/ml threshold
+
+    -   If concentration is not available --\> the OD is either too high or too low, in which case seropositivity is determined by which extreme it is closer to (i.e., if OD closer to 0, label as negative and label as positive when OD is closer to 4)
 
 Also filter samples from HCMC only
 
@@ -185,8 +190,8 @@ preprocessed_data %>%
       )
 ```
 
-
 ## Regression plot
+
 ```{r warning=FALSE}
 #| code-fold: true
 #| code-summary: "Code for plotting concentration over age"
@@ -224,14 +229,11 @@ preprocessed_data %>%
       ) + 
     guides(fill = "none")
 ```
-
-
-
 :::
 
 ***Note:***
 
--   There are no samples for age groups `3 - 5` and `12 - 15` during the 2012-2016 collection period 
+-   There are no samples for age groups `3 - 5` and `12 - 15` during the 2012-2016 collection period
 
 The following table summarizes number of samples for each rounded age from each collection period
 
@@ -443,7 +445,9 @@ prevalence_by_agegrp <- data_by_agegrp %>%
   ) %>% 
   ungroup()
 ```
+
 Seroprevalence with confidence intervals
+
 ```{r}
 #| code-fold: true
 #| code-summary: "generate the table"
@@ -467,12 +471,14 @@ prevalence_by_agegrp %>%
     )
   )
 ```
+
 Comparison tables with p-value. Only samples from the 2 age groups `<3` and `7-12` are included.
 
-::: {.panel-tabset}
-
+::: panel-tabset
 ## Overall
+
 Chi-squared test
+
 ```{r warning=FALSE}
 #| code-fold: true
 #| code-summary: "generate the summary table"
@@ -535,13 +541,16 @@ prevalence_compare <- data_by_agegrp %>%
     values_from = label
   )
 ```
+
 Check the negative-positive counts for each age group
+
 ```{r}
 map(prevalence_compare$data, 
   \(df){
     table(df$serostatus, df$time_durr)
 })
 ```
+
 Comparison table with p-value from the Fisher exact test
 
 ```{r}
@@ -570,9 +579,7 @@ prevalence_compare %>%
     decimals = 4
   )
 ```
-
 :::
-
 
 ### Age stratified seroprevalence
 
@@ -618,12 +625,11 @@ compute_seroprev <- function(data, age_lim, dilution_fct, group_var){
 
 Check whether there is a difference in seroprevalence between:
 
--  samples from the 2 collection periods
+-   samples from the 2 collection periods
 
--  female and male samples
+-   female and male samples
 
-::: {.panel-tabset}
-
+::: panel-tabset
 ## Collection period
 
 ```{r message = FALSE, warning=FALSE}
@@ -638,6 +644,7 @@ summary(seroprev_mod_coll)
 ```
 
 ## Gender
+
 ```{r message = FALSE, warning=FALSE}
 #| code-fold: true
 #| code-summary: "Model stratified by gender"
@@ -650,6 +657,7 @@ summary(seroprev_mod_gender)
 ```
 
 ## No stratification
+
 ```{r message = FALSE, warning=FALSE}
 #| code-fold: true
 #| code-summary: "Model without stratification for smoothing"
@@ -659,8 +667,7 @@ seroprev_mod <- preprocessed_data %>%
   gam(cbind(pos, neg) ~ s(rounded_age, bs = "bs"), data = ., family=binomial(link = "logit"))
 summary(seroprev_mod)
 ```
-
-::: 
+:::
 
 ***Note:***
 
@@ -686,6 +693,7 @@ preprocessed_data %>%
 ### Quick visualization
 
 Visualize the model for collection period/gender stratified smoothing
+
 ```{r}
 #| code-fold: true
 #| code-summary: "Helper function to visualize model with confidence interval"
@@ -708,7 +716,7 @@ visualize_pred <- function(data, mod, group_var, ci = 0.95, length_out = 100, ce
   p <- (1 - ci) / 2
   n <- mod$df.residual
   
-  out <- predict.gam(
+  out <- predict(
     mod,
     newdata = newdata, se.fit = TRUE) %>% 
   as_tibble() %>% 
@@ -756,10 +764,9 @@ visualize_pred <- function(data, mod, group_var, ci = 0.95, length_out = 100, ce
 }
 ```
 
-
-::: {.panel-tabset}
-
+::: panel-tabset
 ## Collection period
+
 ```{r  message = FALSE, warning=FALSE}
 preprocessed_data %>% 
   compute_seroprev(age_lim = 15, dilution_fct = dilution_fct, group_var = "time_durr") %>%
@@ -768,17 +775,17 @@ preprocessed_data %>%
     color = "Collection period"
   )
 ```
+
 ## Gender
 
 Imbalance in sample size causes larger CI interval for female
+
 ```{r  message = FALSE, warning=FALSE}
 preprocessed_data %>% 
   compute_seroprev(age_lim = 15, dilution_fct = dilution_fct, group_var = "gender") %>% 
   visualize_pred(mod = seroprev_mod_gender, group_var = "gender")
 ```
-
 :::
-
 
 ## HCDC samples - a closer look
 
