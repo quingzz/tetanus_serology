@@ -158,6 +158,7 @@ plot_standard_curve <- function(scdf, data=NULL, ylim=NULL, datapoint_size = 3){
       y = "Optical density"
     )
 
+  # if data is provided, plot the data points as well
   if (!is.null(data)){
     plot <- plot +
       geom_point(

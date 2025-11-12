@@ -1,0 +1,224 @@
+---
+title: "Test serosv using tetanus data"
+format: 
+   html:
+     df-print: paged
+---
+
+```{r message=FALSE, warning=FALSE}
+# devtools::install("/Users/anhptq/Desktop/serosv")
+library(tidyverse)
+library(readxl)
+library(serosv)
+```
+
+## Data
+
+Load OUCRU tetanus data for testing
+
+```{r message=FALSE, warning=FALSE}
+#| code-fold: true
+#| code-summary: "Load data"
+
+data_path <- "./data/raw/oucru/merged_tetanus_batch1.csv"
+data <- read_csv(data_path)
+
+data
+```
+
+Data must first go through the data pre-processing step to make sure it matches the expected format. The data is expected to have the following columns:
+
+-   Column for plate id
+
+-   Column for sample id (where antitoxin are also labeled as such)
+
+-   Column for result (e.g. OD)
+
+-   Column for dilution factors
+
+-   (Optionally) Columns for negative control at tested dilution factors
+
+To preprocess the data, call `serosv::standardize_data()`
+
+```{r}
+preprocessed_data <- standardize_data(
+  data,
+  plate_id_col = "PLATE_ID", # name of the column storing plates id
+  id_col = "HC_SAMPLE_ID", # name of the column storing sample id
+  result_col = "RESULT", # name of the column storing result
+  dilution_fct_col = "DILUTION_FACTORS", # name of the column storing tested dilution factors
+  antitoxin_label = "Anti_toxin", # label for antitoxin in the sample id column
+  negative_col = "^NEGATIVE_*" # regex/naming convention for negative controls
+)
+
+preprocessed_data
+```
+
+## Convert to titer
+
+### Simple workflow
+
+To convert OD to titer, use `serosv::to_titer()` function
+
+```{r}
+processed_data <- serosv::to_titer(
+  preprocessed_data, # output from serosv::standardize_data()
+  model = "4PL", # model for the standard curve
+  positive_threshold = 0.1, # titer threshold for a sample to be considered positive
+  ci = 0.95, # confidence interval of titer estimate
+  negative_control = TRUE) # whether to label serostatus for negative controls, ignored if positive_threshold = NULL
+
+processed_data
+```
+
+To view the processed samples - that is, the original samples with their corresponding titer estimates - simply unnest the `processed_data` column.
+
+The columns for titer estimates are
+
+-   `lower` lower bound of the confidence interval for the titer estimate.
+
+-   `median` median (predicted) titer value.
+
+-   `upper` upper bound of the confidence interval for titer estimate.
+
+```{r}
+processed_data %>% 
+  select(plate_id, processed_data) %>% 
+  unnest(processed_data) %>% 
+  head()
+```
+
+### Custom model
+
+The users can also define their own model for fitting the standard curve and a function for quantifying the confidence intervals.
+
+To do this, define the `model` argument of `serosv::to_titer()` as a named list of 2 items where:
+
+-   `mod` is a function that takes a `df` as input and return a fitted standard curve model
+
+-   `quantify_ci` is a function to compute the confidence intervals, with the following required arguments
+
+    -   `object` the fitted model
+
+    -   `newdata` the new predictor values for which predictions are made
+
+    -   `nb` the number of samples (required for bootstrapping, but may be unused otherwise)
+
+    -   `alpha` the significance level
+
+    `quantify_ci` must return a data.frame/tibble with the following columns:
+
+    -   `lower` lower bound of the confidence interval for the titer estimate.
+
+    -   `median` median (predicted) titer value.
+
+    -   `upper` upper bound of the confidence interval for titer estimate.
+
+```{r}
+#| code-fold: true
+#| code-summary: "Define custom model function and function to compute ci"
+
+library(mvtnorm)
+custom_4PL <- function (df){
+  good_guess4PL <- function(x, y, eps = 0.3) {
+    nb_rep <- unique(table(x))
+    the_order <- order(x)
+    x <- x[the_order]
+    y <- y[the_order]
+    a <- min(y)
+    d <- max(y)
+    c <- approx(y, x, (d - a)/2, ties = "ordered")$y
+    list(a = a, c = c, d = d, b = (approx(x, y, c + eps, ties = "ordered")$y - 
+        approx(x, y, c - eps, ties = "ordered")$y)/(2 * eps))
+  }
+  
+  nls(
+    result ~ d + (a - d) / (1 + 10 ^ ((log10(concentration) - c) * b)),
+    data = df,
+    start = with(df, good_guess4PL(log10(concentration), result))
+  )
+}
+
+custom_quantify_ci <- function(object, newdata, nb = 9999, alpha = 0.025){
+  rowsplit <- function(df) split(df, 1:nrow(df))
+
+  nb |>
+    rmvnorm(mean = coef(object), sigma = vcov(object)) |>
+    as.data.frame() |>
+    rowsplit() |>
+    map(as.list) |>
+    map(~ c(.x, newdata)) |>
+    map_dfc(eval, expr = parse(text = as.character(formula(object))[3])) %>%
+    apply(1, quantile, c(alpha, .5, 1 - alpha))  %>%
+    t() %>%  as.data.frame() %>%
+    setNames(c("lower", "median", "upper"))
+}
+```
+
+```{r}
+# use the custom model and quantify ci function
+custom_mod <- list(
+  "mod" = custom_4PL,
+  "quantify_ci" = custom_quantify_ci
+)
+custom_mod_out <- to_titer(
+  preprocessed_data,
+  model = custom_mod,
+  positive_threshold = 0.1, ci = 0.95,
+  negative_control = TRUE)
+```
+
+### Visualize standard curves
+
+To visualize the standard curves, use `serosv::plot_standard_curve()`
+
+```{r}
+plot_standard_curve(processed_data, facet=TRUE, datapoint_size = 1)
+```
+
+To view all standard curves on the same plot, set `facet = FALSE`
+
+```{r}
+plot_standard_curve(processed_data, facet=FALSE)
+```
+
+The users can also add a layer displaying the positive threshold at different dilution factors using `serosv::add_thresholds()`
+
+```{r}
+plot_standard_curve(processed_data, facet=FALSE) + 
+  add_thresholds(dilution_factors = c(200, 100, 50), positive_threshold = 0.1)
+```
+
+## Quality control
+
+### Negative control
+
+We can inspect the serostatus of negative controls (from `negative_control`) to verify that all of them are labeled negative
+
+```{r}
+processed_data %>% 
+  select(plate_id, negative_control) %>% 
+  unnest(negative_control) %>% 
+  filter(positive)
+```
+
+### Titer availability
+
+To have an overview of the titer availability, use `serosv::plot_titer_qc()`
+
+```{r}
+#| fig-width: 10
+#| fig-height: 5
+serosv::plot_titer_qc(
+  processed_data,
+  n_plates = NULL, # maximum number of plates to visualize, if NULL then plot all
+  n_samples = 22, # maximum number of samples per plate to visualize
+  n_dilutions = 3 # number of dilutions used for testing
+)
+```
+
+Refer to the document for guidance on how to interpret the plot
+
+```{r eval=FALSE}
+?serosv::plot_titer_qc
+```
